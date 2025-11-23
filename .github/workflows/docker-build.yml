@@ -65,36 +65,71 @@ jobs:
         echo "=== Flannel Update Complete! ==="
         kubectl get ds $DS -n $NS -o wide
 
-    # ▼▼▼ [여기서부터 추가된 테스트 코드입니다] ▼▼▼
+  # [Job 3] 네트워크 검증 (Ping Test)
+  e2e-test:
+    needs: deploy
+    runs-on: [ self-hosted, linux ]
+    steps:
     - name: Run Network Connectivity Test
       run: |
-        echo "=== 2. Starting Connectivity Test (Ping) ==="
+        echo "=== Starting Connectivity Test (Ping) ==="
 
-        # 1. 테스트용 네임스페이스 생성 (기존에 있으면 삭제 후 재생성)
-        kubectl delete ns net-check --ignore-not-found=true
+        # -------------------------------------------------------
+        # [1. 청소 및 초기화] (요청하신 부분!)
+        # -------------------------------------------------------
+        echo "🧹 Cleaning up previous resources..."
+
+        # 기존 네임스페이스가 있다면 삭제 (이러면 내부의 Pod들도 다 죽음)
+        # --wait=true: 삭제가 완전히 끝날 때까지 기다림 (중요)
+        kubectl delete ns net-check --ignore-not-found=true --wait=true
+
+        echo "✨ Creating fresh namespace..."
         kubectl create ns net-check
 
         # -------------------------------------------------------
-        # [Test A] 같은 노드 내 통신 (Same Node: Pod -> Pod)
+        # [Test A] Same Node (Pod -> Pod)
         # -------------------------------------------------------
         echo "[Test A] Preparing Same-Node Pods..."
 
-        # 현재 러너가 실행 중인 노드(마스터) 이름을 가져옵니다.
+        # 현재 노드 이름 가져오기
         NODE_NAME=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
 
-        # 해당 노드에 파드 2개를 강제로 띄웁니다.
+        # Deployment 생성
         kubectl create deployment same-node-test --image=busybox --replicas=2 -n net-check -- sleep 3600
 
-        # Node Selector 패치 (특정 노드에 고정)
+        # Node Selector 패치
         kubectl patch deployment same-node-test -n net-check -p "{\"spec\":{\"template\":{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"$NODE_NAME\"}}}}}"
 
         # -------------------------------------------------------
-        # [Test B] 서로 다른 노드 간 통신 (Cross Node: Node -> Node)
+        # [Test B] Cross Node (Node -> Node) - YAML로 생성
         # -------------------------------------------------------
         echo "[Test B] Preparing Cross-Node Pods (DaemonSet)..."
 
-        # 모든 노드에 파드를 하나씩 띄웁니다.
-        kubectl create ds cross-node-test --image=busybox -n net-check -- sleep 3600
+        # DaemonSet 생성 (모든 노드에 배포)
+        cat <<EOF | kubectl apply -f -
+        apiVersion: apps/v1
+        kind: DaemonSet
+        metadata:
+          name: cross-node-test
+          namespace: net-check
+          labels:
+            app: cross-node-test
+        spec:
+          selector:
+            matchLabels:
+              app: cross-node-test
+          template:
+            metadata:
+              labels:
+                app: cross-node-test
+            spec:
+              containers:
+              - name: busybox
+                image: busybox
+                command: ["sleep", "3600"]
+              tolerations:
+              - operator: Exists
+        EOF
 
         # -------------------------------------------------------
         # 파드 준비 대기
@@ -104,35 +139,33 @@ jobs:
         kubectl rollout status ds/cross-node-test -n net-check
 
         # -------------------------------------------------------
-        # 실제 Ping 발사!
+        # Ping 실행 (실패하면 즉시 종료됨)
         # -------------------------------------------------------
         echo ">>> Executing Ping Tests..."
 
         # [1. Same Node Ping]
-        # 같은 노드에 있는 파드 A와 파드 B를 찾습니다.
         SAME_POD_A=$(kubectl get pods -n net-check -l app=same-node-test -o jsonpath='{.items[0].metadata.name}')
         SAME_POD_B=$(kubectl get pods -n net-check -l app=same-node-test -o jsonpath='{.items[1].metadata.name}')
         SAME_IP_B=$(kubectl get pod $SAME_POD_B -n net-check -o jsonpath='{.status.podIP}')
 
-        echo "Checking Same Node Connectivity ($SAME_POD_A -> $SAME_POD_B IP: $SAME_IP_B)..."
+        echo "Checking Same Node ($SAME_POD_A -> $SAME_IP_B)..."
         kubectl exec -n net-check $SAME_POD_A -- ping -c 3 $SAME_IP_B
 
-        # [2. Cross Node Ping]
-        # 노드가 2개 이상일 때만 수행합니다.
+        # [2. Cross Node Ping] (노드 2개 이상일 때만)
         NODE_COUNT=$(kubectl get nodes --no-headers | wc -l)
-
         if [ "$NODE_COUNT" -gt 1 ]; then
-          # 서로 다른 노드에 있는 파드(DaemonSet이라 노드당 1개임) 2개를 고릅니다.
           CROSS_POD_A=$(kubectl get pods -n net-check -l app=cross-node-test -o jsonpath='{.items[0].metadata.name}')
           CROSS_POD_B=$(kubectl get pods -n net-check -l app=cross-node-test -o jsonpath='{.items[1].metadata.name}')
           CROSS_IP_B=$(kubectl get pod $CROSS_POD_B -n net-check -o jsonpath='{.status.podIP}')
           
-          # A 노드 파드에서 B 노드 파드 IP로 핑
-          echo "Checking Cross Node Connectivity ($CROSS_POD_A -> $CROSS_POD_B IP: $CROSS_IP_B)..."
+          echo "Checking Cross Node ($CROSS_POD_A -> $CROSS_IP_B)..."
           kubectl exec -n net-check $CROSS_POD_A -- ping -c 3 $CROSS_IP_B
         else
-          echo "⚠️ Skipping Cross Node Test: Cluster has only 1 node."
+          echo "Skipping Cross Node Test (Single Node Cluster)"
         fi
 
+        # -------------------------------------------------------
+        # Cleanup (성공 시에만 실행됨)
+        # -------------------------------------------------------
         echo "=== All Tests Passed! Cleaning up... ==="
         kubectl delete ns net-check
