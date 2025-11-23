@@ -201,6 +201,10 @@ func newSubnetManager(ctx context.Context) (subnet.Manager, error) {
 }
 
 func main() {
+	log.Info("##################################################")
+	log.Info("!!! HELLO! THIS IS MY CUSTOM FLANNEL - VER 1.0 !!!")
+	log.Info("##################################################")
+
 	if opts.version {
 		fmt.Fprintln(os.Stderr, version.Version)
 		os.Exit(0)
