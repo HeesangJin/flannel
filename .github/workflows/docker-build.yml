@@ -1,0 +1,37 @@
+name: Build and Push Flannel (AMD64)
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'  # <--- [추가] feat/로 시작하는 모든 브랜치 허용
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: images/Dockerfile
+          push: true
+          platforms: linux/amd64
+          # 태그 전략
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/my-custom-flannel:${{ github.sha }}
+            ${{ secrets.DOCKER_USERNAME }}/my-custom-flannel:latest
+          build-args: |
+            TAG=${{ github.sha }}
