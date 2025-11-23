@@ -37,3 +37,38 @@ jobs:
           ${{ secrets.DOCKER_USERNAME }}/my-custom-flannel:latest
         build-args: |
           TAG=${{ github.sha }}
+
+  # [Job 2] 마스터 노드(Self-hosted Runner)에서 실행될 배포 단계
+  deploy:
+    needs: build-and-push # 빌드가 성공해야만 실행됨
+    runs-on: [ self-hosted, linux ] # <--- [핵심] 님의 마스터 노드를 지칭함!
+    steps:
+    - name: Update Flannel CNI
+      run: |
+        echo "=== Deploying to Azure Master Node ==="
+          
+          # 아까 확인해주신 정확한 이름들
+          NS="kube-flannel"
+          DS="kube-flannel-ds"
+          CONTAINER="kube-flannel"
+          
+          # Docker Hub 이미지 주소
+          IMAGE="${{ secrets.DOCKER_USERNAME }}/my-custom-flannel:${{ github.sha }}"
+          
+          echo "Target: $NS / $DS"
+          echo "New Image: $IMAGE"
+          
+          # 1. 이미지 교체 명령
+          # (kubectl이 알아서 기존 파드를 하나씩 죽이고 새 이미지를 뜬 파드로 교체합니다)
+          kubectl set image daemonset/$DS -n $NS $CONTAINER=$IMAGE
+          
+          # 2. 확실하게 적용하기 위해 재시작 트리거
+          kubectl rollout restart daemonset/$DS -n $NS
+          
+          # 3. 배포 완료 대기 (새 파드들이 다 뜰 때까지 여기서 기다려줍니다)
+          kubectl rollout status daemonset/$DS -n $NS
+          
+          echo "=== Deployment Complete! ==="
+          
+          # 4. 결과 확인 (Image 부분이 바뀐 태그로 나오는지 보세요)
+          kubectl get ds $DS -n $NS -o wide
