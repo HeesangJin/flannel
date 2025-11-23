@@ -1,10 +1,10 @@
 name: Build and Push Flannel (AMD64)
-#
+
 on:
   push:
     branches:
     - main
-    - 'feat/**' # <--- [추가] feat/로 시작하는 모든 브랜치 허용
+    - 'feat/**'
   workflow_dispatch:
 
 
@@ -31,44 +31,108 @@ jobs:
         file: images/Dockerfile
         push: true
         platforms: linux/amd64
-        # 태그 전략
         tags: |
           ${{ secrets.DOCKER_USERNAME }}/my-custom-flannel:${{ github.sha }}
           ${{ secrets.DOCKER_USERNAME }}/my-custom-flannel:latest
         build-args: |
           TAG=${{ github.sha }}
 
-  # [Job 2] 마스터 노드(Self-hosted Runner)에서 실행될 배포 단계
   deploy:
-    needs: build-and-push # 빌드가 성공해야만 실행됨
-    runs-on: [ self-hosted, linux ] # <--- [핵심] 님의 마스터 노드를 지칭함!
+    needs: build-and-push
+    runs-on: [ self-hosted, linux ]
     steps:
     - name: Update Flannel CNI
       run: |
-        echo "=== Deploying to Azure Master Node ==="
+        echo "=== 1. Deploying to Kubernetes Cluster ==="
+
+        NS="kube-flannel"
+        DS="kube-flannel-ds"
+        CONTAINER="kube-flannel"
+        IMAGE="${{ secrets.DOCKER_USERNAME }}/my-custom-flannel:${{ github.sha }}"
+
+        echo "Target: $NS / $DS"
+        echo "New Image: $IMAGE"
+
+        # 이미지 교체
+        kubectl set image daemonset/$DS -n $NS $CONTAINER=$IMAGE
+
+        # 재시작 트리거
+        kubectl rollout restart daemonset/$DS -n $NS
+
+        # 완료 대기
+        kubectl rollout status daemonset/$DS -n $NS
+
+        echo "=== Flannel Update Complete! ==="
+        kubectl get ds $DS -n $NS -o wide
+
+    # ▼▼▼ [여기서부터 추가된 테스트 코드입니다] ▼▼▼
+    - name: Run Network Connectivity Test
+      run: |
+        echo "=== 2. Starting Connectivity Test (Ping) ==="
+
+        # 1. 테스트용 네임스페이스 생성 (기존에 있으면 삭제 후 재생성)
+        kubectl delete ns net-check --ignore-not-found=true
+        kubectl create ns net-check
+
+        # -------------------------------------------------------
+        # [Test A] 같은 노드 내 통신 (Same Node: Pod -> Pod)
+        # -------------------------------------------------------
+        echo "[Test A] Preparing Same-Node Pods..."
+
+        # 현재 러너가 실행 중인 노드(마스터) 이름을 가져옵니다.
+        NODE_NAME=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+
+        # 해당 노드에 파드 2개를 강제로 띄웁니다.
+        kubectl create deployment same-node-test --image=busybox --replicas=2 -n net-check -- sleep 3600
+
+        # Node Selector 패치 (특정 노드에 고정)
+        kubectl patch deployment same-node-test -n net-check -p "{\"spec\":{\"template\":{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"$NODE_NAME\"}}}}}"
+
+        # -------------------------------------------------------
+        # [Test B] 서로 다른 노드 간 통신 (Cross Node: Node -> Node)
+        # -------------------------------------------------------
+        echo "[Test B] Preparing Cross-Node Pods (DaemonSet)..."
+
+        # 모든 노드에 파드를 하나씩 띄웁니다.
+        kubectl create ds cross-node-test --image=busybox -n net-check -- sleep 3600
+
+        # -------------------------------------------------------
+        # 파드 준비 대기
+        # -------------------------------------------------------
+        echo "Waiting for test pods to be ready..."
+        kubectl rollout status deployment/same-node-test -n net-check
+        kubectl rollout status ds/cross-node-test -n net-check
+
+        # -------------------------------------------------------
+        # 실제 Ping 발사!
+        # -------------------------------------------------------
+        echo ">>> Executing Ping Tests..."
+
+        # [1. Same Node Ping]
+        # 같은 노드에 있는 파드 A와 파드 B를 찾습니다.
+        SAME_POD_A=$(kubectl get pods -n net-check -l app=same-node-test -o jsonpath='{.items[0].metadata.name}')
+        SAME_POD_B=$(kubectl get pods -n net-check -l app=same-node-test -o jsonpath='{.items[1].metadata.name}')
+        SAME_IP_B=$(kubectl get pod $SAME_POD_B -n net-check -o jsonpath='{.status.podIP}')
+
+        echo "Checking Same Node Connectivity ($SAME_POD_A -> $SAME_POD_B IP: $SAME_IP_B)..."
+        kubectl exec -n net-check $SAME_POD_A -- ping -c 3 $SAME_IP_B
+
+        # [2. Cross Node Ping]
+        # 노드가 2개 이상일 때만 수행합니다.
+        NODE_COUNT=$(kubectl get nodes --no-headers | wc -l)
+
+        if [ "$NODE_COUNT" -gt 1 ]; then
+          # 서로 다른 노드에 있는 파드(DaemonSet이라 노드당 1개임) 2개를 고릅니다.
+          CROSS_POD_A=$(kubectl get pods -n net-check -l app=cross-node-test -o jsonpath='{.items[0].metadata.name}')
+          CROSS_POD_B=$(kubectl get pods -n net-check -l app=cross-node-test -o jsonpath='{.items[1].metadata.name}')
+          CROSS_IP_B=$(kubectl get pod $CROSS_POD_B -n net-check -o jsonpath='{.status.podIP}')
           
-          # 아까 확인해주신 정확한 이름들
-          NS="kube-flannel"
-          DS="kube-flannel-ds"
-          CONTAINER="kube-flannel"
-          
-          # Docker Hub 이미지 주소
-          IMAGE="${{ secrets.DOCKER_USERNAME }}/my-custom-flannel:${{ github.sha }}"
-          
-          echo "Target: $NS / $DS"
-          echo "New Image: $IMAGE"
-          
-          # 1. 이미지 교체 명령
-          # (kubectl이 알아서 기존 파드를 하나씩 죽이고 새 이미지를 뜬 파드로 교체합니다)
-          kubectl set image daemonset/$DS -n $NS $CONTAINER=$IMAGE
-          
-          # 2. 확실하게 적용하기 위해 재시작 트리거
-          kubectl rollout restart daemonset/$DS -n $NS
-          
-          # 3. 배포 완료 대기 (새 파드들이 다 뜰 때까지 여기서 기다려줍니다)
-          kubectl rollout status daemonset/$DS -n $NS
-          
-          echo "=== Deployment Complete! ==="
-          
-          # 4. 결과 확인 (Image 부분이 바뀐 태그로 나오는지 보세요)
-          kubectl get ds $DS -n $NS -o wide
+          # A 노드 파드에서 B 노드 파드 IP로 핑
+          echo "Checking Cross Node Connectivity ($CROSS_POD_A -> $CROSS_POD_B IP: $CROSS_IP_B)..."
+          kubectl exec -n net-check $CROSS_POD_A -- ping -c 3 $CROSS_IP_B
+        else
+          echo "⚠️ Skipping Cross Node Test: Cluster has only 1 node."
+        fi
+
+        echo "=== All Tests Passed! Cleaning up... ==="
+        kubectl delete ns net-check
