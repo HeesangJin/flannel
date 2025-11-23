@@ -72,7 +72,7 @@ func init() {
 }
 
 const (
-	defaultVNI = 1
+	defaultVNI = 99
 )
 
 type VXLANBackend struct {
