@@ -347,6 +347,17 @@ func (nw *network) handleSubnetEvents(batch []lease.Event) {
 						continue
 					}
 				} else {
+					// =================================================================
+					// [실험 2] ARP/FDB 추가 직전 로그 심기
+					// =================================================================
+					log.Info("################################################################")
+					log.Infof(">>> [EVENT DETECTED] New Node Discovered via VXLAN!")
+					log.Infof("    Target Subnet : %s", sn)
+					log.Infof("    Target IP     : %s", attrs.PublicIP)
+					// VtepMAC은 []byte 타입이라 net.HardwareAddr로 캐스팅해야 이쁘게 나옵니다
+					log.Infof("    Target MAC    : %s", net.HardwareAddr(vxlanAttrs.VtepMAC))
+					log.Info("    Action        : Adding Static ARP & FDB Entry to Kernel...")
+					log.Info("################################################################")
 					log.V(2).Infof("adding subnet: %s PublicIP: %s VtepMAC: %s", sn, attrs.PublicIP, net.HardwareAddr(vxlanAttrs.VtepMAC))
 					if err := retry.Do(func() error {
 						return nw.dev.AddARP(neighbor{IP: sn.IP, MAC: net.HardwareAddr(vxlanAttrs.VtepMAC)})
