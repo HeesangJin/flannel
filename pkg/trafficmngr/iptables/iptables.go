@@ -95,6 +95,15 @@ func (iptm *IPTablesManager) SetupAndEnsureMasqRules(ctx context.Context, flanne
 	resyncPeriod int,
 	ipMasqRandomFullyDisable bool) error {
 
+	// ▼▼▼ [추가할 코드] ▼▼▼
+	log.Info("===============================================================")
+	log.Info(">>> [TRAFFIC MGR] Setting up IPtables MASQUERADE Rules! <<<")
+	log.Infof("    Cluster Network (Global) : %v", flannelIPv4Net)
+	log.Infof("    My Subnet (Local)        : %v", currentlease.Subnet)
+	log.Info("    Action: Ensuring SNAT rules for outbound traffic...")
+	log.Info("===============================================================")
+	// ▲▲▲
+
 	if !flannelIPv4Net.Empty() {
 		// recycle iptables rules only when network configured or subnet leased is not equal to current one.
 		if !(flannelIPv4Net.Equal(prevNetwork) && prevSubnet.Equal(currentlease.Subnet)) {
@@ -108,8 +117,11 @@ func (iptm *IPTablesManager) SetupAndEnsureMasqRules(ctx context.Context, flanne
 			}
 		}
 
+		// 1. 최초 설치
 		log.Infof("Setting up masking rules")
 		iptm.CreateIP4Chain("nat", "FLANNEL-POSTRTG")
+
+		// 2. 감시 고루틴 실행
 		go iptm.setupAndEnsureIP4Tables(ctx, iptm.masqRules(flannelIPv4Net, currentlease, ipMasqRandomFullyDisable), resyncPeriod)
 	}
 	if !flannelIPv6Net.Empty() {
@@ -477,14 +489,18 @@ func (iptm *IPTablesManager) deleteIP6Tables(rules []trafficmngr.IPTablesRule) e
 }
 
 func ensureIPTables(ipt IPTables, iptRestore IPTablesRestore, rules []trafficmngr.IPTablesRule) error {
+	// 1. 커널에게 물어봄: "이 룰들(rules) 지금 다 있니?"
 	exists, err := ipTablesRulesExist(ipt, rules)
 	if err != nil {
 		return fmt.Errorf("error checking rule existence: %v", err)
 	}
+	// 2. 이상 무! (Happy Path)
 	if exists {
 		// if all the rules already exist, no need to do anything
 		return nil
 	}
+	// 3. 싹 밀고 다시 깔기 (Bootstrap)
+	// [중요] 부족한 룰만 하나 띡 추가하는 게 아닙니다.
 	// Otherwise, teardown all the rules and set them up again
 	// We do this because the order of the rules is important
 	log.Info("Some iptables rules are missing; deleting and recreating rules")

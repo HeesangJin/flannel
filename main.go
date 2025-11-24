@@ -268,6 +268,10 @@ func main() {
 		os.Exit(0)
 	}
 
+	fmt.Println("----------------------------------------------------")
+	fmt.Printf("[STEP 1] Network Config Fetched! Backend Type: %s\n", config.BackendType)
+	fmt.Println("----------------------------------------------------")
+
 	// Get ip family stack
 	ipStack, stackErr := ipmatch.GetIPFamily(config.EnableIPv4, config.EnableIPv6)
 	if stackErr != nil {
@@ -369,6 +373,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// [1단계] VTEP 생성 및 리스 획득 (vxlan.go -> RegisterNetwork)
+	// 여기서 flannel.99 인터페이스가 생기고, 내 서브넷(10.244.1.0/24)이 확정됨.
+	fmt.Println("[STEP 2] Initializing Backend... (Creating flannel interface & Acquiring Lease)")
 	bn, err := be.RegisterNetwork(ctx, &wg, config)
 	if err != nil {
 		log.Errorf("Error registering network: %s", err)
@@ -376,6 +383,7 @@ func main() {
 		wg.Wait()
 		os.Exit(1)
 	}
+	fmt.Printf("[STEP 2] Backend Registered! My Subnet Lease is: %s\n", bn.Lease().Subnet)
 
 	// Instanciate a TrafficManager to clean-up the rules of the backend we don't use
 	// This is to ensure a clean state in case flannel is restarted with a different choice
@@ -388,6 +396,7 @@ func main() {
 		wg.Wait()
 		os.Exit(1)
 	}
+	// [2단계] IPtables 매니저 초기화
 	//Create TrafficManager and instantiate it based on whether we use iptables or nftables
 	trafficMngr := newTrafficManager(config.EnableNFTables)
 	err = trafficMngr.Init(ctx)
@@ -421,6 +430,12 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
+	// [3단계] IPtables 룰 설치 (SetupAndEnsureMasqRules)
+	// 여기서 아까 님이 로그 심은 함수가 호출됩니다!
+	// 인자로 bn.Lease()를 넘겨주죠? (1단계에서 확정된 서브넷 정보를 넘김)
+	// iptables -t nat -A POSTROUTING -s 10.244.1.0/24 ! -d 224.0.0.0/4 -j MASQUERADE
+	// 위와 같은 룰을 만들 것임
 
 	// Always enables forwarding rules. This is needed for Docker versions >1.13 (https://docs.docker.com/engine/userguide/networking/default_network/container-communication/#container-communication-between-hosts)
 	// In Docker 1.12 and earlier, the default FORWARD chain policy was ACCEPT.
@@ -463,7 +478,8 @@ func main() {
 			}()
 		}
 	}
-
+	fmt.Printf("[STEP 3] Writing subnet file to: %s\n", opts.subnetFile)
+	fmt.Println("[STEP 3] This file allows the CNI plugin (host-local) to assign IPs to Pods.")
 	if err := sm.HandleSubnetFile(opts.subnetFile, config, opts.ipMasq, bn.Lease().Subnet, bn.Lease().IPv6Subnet, bn.MTU()); err != nil {
 		// Continue, even though it failed.
 		log.Warningf("Failed to write subnet file: %s", err)
@@ -473,6 +489,10 @@ func main() {
 
 	// Start "Running" the backend network. This will block until the context is done so run in another goroutine.
 	log.Info("Running backend.")
+
+	fmt.Println("[STEP 4] Starting Event Loop... Watching for new nodes...")
+	fmt.Println("----------------------------------------------------")
+
 	wg.Add(1)
 	go func() {
 		bn.Run(ctx)

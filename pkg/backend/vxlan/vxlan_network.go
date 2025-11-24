@@ -259,7 +259,8 @@ type vxlanLeaseAttrs struct {
 
 func (nw *network) handleSubnetEvents(batch []lease.Event) {
 	for _, event := range batch {
-		sn := event.Lease.Subnet
+		// 1. 상대방의 PodCIDR을 가져옵니다. (이벤트에 들어있음)
+		sn := event.Lease.Subnet // 예: 10.244.2.0/24
 		v6Sn := event.Lease.IPv6Subnet
 		attrs := event.Lease.Attrs
 		log.Infof("Received Subnet Event with VxLan: %s", attrs.String())
@@ -276,6 +277,7 @@ func (nw *network) handleSubnetEvents(batch []lease.Event) {
 		)
 
 		if event.Lease.EnableIPv4 && nw.dev != nil {
+			// 1. 이벤트에서 JSON 데이터(BackendData)를 꺼냄
 			if err := json.Unmarshal(attrs.BackendData, &vxlanAttrs); err != nil {
 				log.Error("error decoding subnet lease JSON: ", err)
 				continue
@@ -360,6 +362,7 @@ func (nw *network) handleSubnetEvents(batch []lease.Event) {
 					log.Info("################################################################")
 					log.V(2).Infof("adding subnet: %s PublicIP: %s VtepMAC: %s", sn, attrs.PublicIP, net.HardwareAddr(vxlanAttrs.VtepMAC))
 					if err := retry.Do(func() error {
+						// <--- ★ 정답: 서브넷의 네트워크 주소를 그냥 VTEP IP로 씀
 						return nw.dev.AddARP(neighbor{IP: sn.IP, MAC: net.HardwareAddr(vxlanAttrs.VtepMAC)})
 					}); err != nil {
 						log.Error("AddARP failed: ", err)

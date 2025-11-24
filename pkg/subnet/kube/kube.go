@@ -391,6 +391,7 @@ func (ksm *kubeSubnetManager) AcquireLease(ctx context.Context, attrs *lease.Lea
 
 	var cidr, ipv6Cidr *net.IPNet
 	switch {
+	// Case A: 옛날 방식 (PodCIDRs 배열이 없고 단일 필드만 있을 때)
 	case len(n.Spec.PodCIDRs) == 0:
 		_, parseCidr, err := net.ParseCIDR(n.Spec.PodCIDR)
 		if err != nil {
@@ -401,6 +402,7 @@ func (ksm *kubeSubnetManager) AcquireLease(ctx context.Context, attrs *lease.Lea
 		} else if len(parseCidr.IP) == net.IPv6len {
 			ipv6Cidr = parseCidr
 		}
+	// Case B: 최신 방식 (PodCIDRs 배열에 여러 개가 있을 때)
 	case len(n.Spec.PodCIDRs) < 3:
 		for _, podCidr := range n.Spec.PodCIDRs {
 			_, parseCidr, err := net.ParseCIDR(podCidr)
@@ -417,6 +419,7 @@ func (ksm *kubeSubnetManager) AcquireLease(ctx context.Context, attrs *lease.Lea
 		return nil, fmt.Errorf("node %q pod cidrs should be IPv4/IPv6 only or dualstack", ksm.nodeName)
 	}
 
+	// API 서버에 있는 거랑 내가 가진 거랑 다르네?
 	if (n.Annotations[ksm.annotations.BackendData] != string(bd) ||
 		n.Annotations[ksm.annotations.BackendType] != attrs.BackendType ||
 		n.Annotations[ksm.annotations.BackendPublicIP] != attrs.PublicIP.String() ||
@@ -432,6 +435,7 @@ func (ksm *kubeSubnetManager) AcquireLease(ctx context.Context, attrs *lease.Lea
 
 		//TODO -i only vxlan and host-gw backends support dual stack now.
 		if (attrs.BackendType == "vxlan" && string(bd) != "null") || (attrs.BackendType == "wireguard" && string(bd) != "null") || attrs.BackendType != "vxlan" {
+			// n.Annotations[ksm.annotations.BackendData] = string(bd)로 로컬 객
 			n.Annotations[ksm.annotations.BackendData] = string(bd)
 			if n.Annotations[ksm.annotations.BackendPublicIPOverwrite] != "" {
 				if n.Annotations[ksm.annotations.BackendPublicIP] != n.Annotations[ksm.annotations.BackendPublicIPOverwrite] {
@@ -479,6 +483,7 @@ func (ksm *kubeSubnetManager) AcquireLease(ctx context.Context, attrs *lease.Lea
 		}
 
 		waitErr := wait.PollUntilContextTimeout(ctx, 3*time.Second, 30*time.Second, true, func(context.Context) (done bool, err error) {
+			// ▼▼▼ [여기가 바로 업로드하는 순간!] ▼▼▼
 			_, err = ksm.client.CoreV1().Nodes().Patch(ctx, ksm.nodeName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}, "status")
 			if err != nil {
 				log.V(2).Infof("Failed to patch node %q: %v", ksm.nodeName, err)
@@ -500,6 +505,7 @@ func (ksm *kubeSubnetManager) AcquireLease(ctx context.Context, attrs *lease.Lea
 			return nil, fmt.Errorf("subnet %q specified in the flannel net config doesn't contain %q PodCIDR of the %q node", ksm.subnetConf.Network, cidr, ksm.nodeName)
 		}
 
+		// ▼▼▼ [여기!] 최종적으로 내 Lease 객체에 저장함 ▼▼▼
 		lease.Subnet = ip.FromIPNet(cidr)
 	}
 	if ipv6Cidr != nil {
@@ -514,6 +520,22 @@ func (ksm *kubeSubnetManager) AcquireLease(ctx context.Context, attrs *lease.Lea
 		lease.EnableIPv4 = true
 		lease.EnableIPv6 = false
 	}
+
+	// ▼▼▼ [여기서부터 추가] [STEP 2] 로그 심기 ▼▼▼
+	// lease 객체 안에 모든 정보가 다 들어있습니다!
+	log.Info("###########################################################")
+	log.Infof("[STEP 2] >>> LEASE ACQUIRED FROM K8S API SERVER! <<<")
+	if ksm.enableIPv4 {
+		log.Infof("         My Assigned Subnet (IPv4): %s", lease.Subnet)
+	}
+	if ksm.enableIPv6 {
+		log.Infof("         My Assigned Subnet (IPv6): %s", lease.IPv6Subnet)
+	}
+	log.Infof("         My Public IP             : %s", attrs.PublicIP)
+	log.Infof("         Backend Data (JSON)      : %s", string(attrs.BackendData))
+	log.Info("###########################################################")
+	// ▲▲▲ [여기까지 추가] ▲▲▲
+
 	return lease, nil
 }
 

@@ -94,13 +94,16 @@ func newSubnetAttrs(publicIP net.IP, publicIPv6 net.IP, vnid uint32, dev, v6Dev 
 		BackendType: "vxlan",
 	}
 	if publicIP != nil && dev != nil {
+		// [핵심] 내 VTEP 장비(dev)의 MAC 주소를 JSON으로 포장함
 		data, err := json.Marshal(&vxlanLeaseAttrs{
-			VNI:     vnid,
-			VtepMAC: hardwareAddr(dev.MACAddr()),
+			VNI: vnid,
+			// ▼▼▼ [여기!] 내 장비의 MAC 주소를 읽어서 구조체에 넣음 ▼▼▼
+			VtepMAC: hardwareAddr(dev.MACAddr()), // <--- 여기서 내 MAC을 뽑아냄!
 		})
 		if err != nil {
 			return nil, err
 		}
+		// 이걸 LeaseAttrs(임대 속성)에 담아서 리턴함
 		leaseAttrs.PublicIP = ip.FromIP(publicIP)
 		leaseAttrs.BackendData = json.RawMessage(data)
 	}
@@ -127,16 +130,21 @@ func (be *VXLANBackend) RegisterNetwork(ctx context.Context, wg *sync.WaitGroup,
 	}
 	log.Infof("VXLAN config: VNI=%d Port=%d GBP=%v Learning=%v DirectRouting=%v", cfg.VNI, cfg.Port, cfg.GBP, cfg.Learning, cfg.DirectRouting)
 
+	// 1. [생성] VTEP 인터페이스를 먼저 만듭니다.
+	// 이때 커널이 랜덤한 MAC 주소를 부여합니다.
 	dev, v6Dev, err := createVXLANDevice(ctx, config, cfg, be.subnetMgr, be.extIface.Iface.Index, be.extIface.ExtAddr, be.extIface.ExtV6Addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create vxlan device: %w", err)
 	}
 
+	// 2. [추출 & 포장] 방금 만든 장비(dev)에서 MAC을 꺼내서 JSON으로 쌉니다.
+	// 여기서 dev.MACAddr()를 호출해서 MAC을 읽습니다!
 	subnetAttrs, err := newSubnetAttrs(be.extIface.ExtAddr, be.extIface.ExtV6Addr, uint32(cfg.VNI), dev, v6Dev)
 	if err != nil {
 		return nil, err
 	}
 
+	// 3. [업로드] 포장된 데이터(MAC 포함)를 들고 K8s API 서버로 갑니다.
 	lease, err := be.subnetMgr.AcquireLease(ctx, subnetAttrs)
 	switch err {
 	case nil:
@@ -212,10 +220,20 @@ func createVXLANDevice(ctx context.Context,
 			hwAddr:    hwAddr,
 		}
 
+		log.Info("==============================================================")
+		log.Infof(">>> [VTEP CREATION] Requesting Kernel to create VXLAN Device")
+		log.Infof("    Name      : %s", devAttrs.name)
+		log.Infof("    VNI       : %d", devAttrs.vni)
+		log.Infof("    Port      : %d", devAttrs.vtepPort)
+		log.Infof("    Parent IF : %s (Index: %d)", extIfaceIP, extIfaceID)
+		log.Info("==============================================================")
+
 		dev, err = newVXLANDevice(&devAttrs)
 		if err != nil {
 			return nil, nil, err
 		}
+
+		log.Infof(">>> [VTEP CREATION] SUCCESS! Created %s with MAC %v", devAttrs.name, dev.MACAddr())
 		dev.directRouting = cfg.DirectRouting
 	}
 

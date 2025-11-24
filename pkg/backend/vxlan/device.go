@@ -83,6 +83,12 @@ func newVXLANDevice(devAttrs *vxlanDeviceAttrs) (*vxlanDevice, error) {
 }
 
 func ensureLink(vxlan *netlink.Vxlan) (*netlink.Vxlan, error) {
+	log.Infof(">>> [KERNEL SYSCALL] netlink.LinkAdd() Called!")
+	log.Infof("    Target Interface : %s", vxlan.Name)
+	log.Infof("    Target VNI       : %d", vxlan.VxlanId)
+	log.Infof("    Target Port      : %d", vxlan.Port)
+	log.Infof("    VTEP IP (Src)    : %v", vxlan.SrcAddr)
+
 	err := netlink.LinkAdd(vxlan)
 	if err == syscall.EEXIST {
 		// it's ok if the device already exists as long as config is similar
