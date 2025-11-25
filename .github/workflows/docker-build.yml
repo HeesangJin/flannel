@@ -6,7 +6,8 @@ on:
     - main
     - 'feat/**'
   workflow_dispatch:
-
+  repository_dispatch:
+    types: [ update-cni-event ]
 
 jobs:
   # [Job 1] 빌드 및 푸시
@@ -43,6 +44,27 @@ jobs:
     needs: build-and-push
     runs-on: [ self-hosted, linux ]
     steps:
+    - name: Determine Image Tags
+      run: |
+        # 기본값: 현재 Daemon 커밋 SHA, CNI는 latest
+        DAEMON_TAG="${{ github.sha }}"
+        CNI_TAG="latest"
+
+        # 만약 CNI 리포에서 신호를 줘서 실행된 거라면?
+        if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+           echo "🚀 Triggered by CNI Update Event!"
+           # Payload로 넘어온 CNI SHA 사용
+           CNI_TAG="${{ github.event.client_payload.cni_sha }}"
+           
+           # Daemon은 안 바뀌었으니 기존에 안정적인 latest 사용 (또는 현재 SHA 유지)
+           # 여기서는 현재 체크아웃된 코드(Daemon)의 SHA를 그대로 씁니다.
+        fi
+
+        echo "DAEMON_TAG=$DAEMON_TAG" >> $GITHUB_ENV
+        echo "CNI_TAG=$CNI_TAG" >> $GITHUB_ENV
+
+        echo "Resolved Tags -> Daemon: $DAEMON_TAG, CNI: $CNI_TAG"
+
     - name: Update Flannel CNI
       run: |
         echo "=== 1. Deploying to Kubernetes Cluster ==="
@@ -51,17 +73,17 @@ jobs:
         DS="kube-flannel-ds"
         CONTAINER="kube-flannel"
 
-        # 1. 데몬 이미지 (현재 레포에서 빌드된 SHA)
-        DAEMON_IMAGE="${{ secrets.DOCKER_USERNAME }}/my-custom-flannel:${{ github.sha }}"
+        # [3] 결정된 태그 사용
+        DAEMON_IMAGE="${{ secrets.DOCKER_USERNAME }}/my-custom-flannel:${{ env.DAEMON_TAG }}"
 
-        # ▼▼▼ [추가] CNI 플러그인 이미지 (CNI 레포에서 빌드된 latest) ▼▼▼
-        CNI_IMAGE="${{ secrets.DOCKER_USERNAME }}/my-cni-plugin:latest"
+        # CNI 이미지는 아까 정한 이름(my-cni-plugin)과 동적 태그 사용
+        CNI_IMAGE="${{ secrets.DOCKER_USERNAME }}/my-cni-plugin:${{ env.CNI_TAG }}"
 
         echo "Target: $NS / $DS"
         echo "Daemon Image: $DAEMON_IMAGE"
         echo "CNI Image:    $CNI_IMAGE"
 
-        # ▼▼▼ [수정] 메인 컨테이너와 Init 컨테이너 동시 교체 ▼▼▼
+        # 메인 컨테이너와 Init 컨테이너 동시 교체
         kubectl set image daemonset/$DS -n $NS \
           $CONTAINER=$DAEMON_IMAGE \
           install-cni-plugin=$CNI_IMAGE
